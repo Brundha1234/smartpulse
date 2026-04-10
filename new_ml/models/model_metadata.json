@@ -1,0 +1,300 @@
+{
+  "model_type": "Stacking",
+  "best_model": "Stacking",
+  "best_accuracy": 0.965,
+  "base_features": [
+    "screen_time",
+    "app_usage",
+    "night_usage",
+    "unlock_count",
+    "notification_count",
+    "social_media_time",
+    "gaming_time",
+    "productivity_time",
+    "weekend_usage",
+    "stress_level",
+    "anxiety_level",
+    "depression_level",
+    "sleep_quality",
+    "work_productivity",
+    "social_interactions",
+    "physical_activity",
+    "age",
+    "gender",
+    "education",
+    "occupation_type",
+    "income_level"
+  ],
+  "engineered_features": [
+    "night_screen_ratio",
+    "social_screen_ratio",
+    "notifications_per_unlock",
+    "unlocks_per_hour",
+    "weekend_screen_ratio",
+    "sleep_deficit",
+    "wellbeing_strain",
+    "productivity_gap",
+    "social_intensity",
+    "compulsion_index",
+    "focus_balance",
+    "alert_fatigue",
+    "late_compulsion",
+    "screen_unlock_interaction",
+    "age_adjusted_usage",
+    "healthy_buffer",
+    "habit_pressure",
+    "borderline_support",
+    "recreation_share",
+    "digital_burden"
+  ],
+  "selected_features": [
+    "screen_time",
+    "app_usage",
+    "night_usage",
+    "unlock_count",
+    "stress_level",
+    "anxiety_level",
+    "depression_level",
+    "sleep_quality",
+    "work_productivity",
+    "social_interactions",
+    "physical_activity",
+    "education",
+    "occupation_type",
+    "income_level",
+    "sleep_deficit",
+    "wellbeing_strain",
+    "productivity_gap",
+    "focus_balance",
+    "alert_fatigue",
+    "late_compulsion",
+    "screen_unlock_interaction",
+    "age_adjusted_usage",
+    "healthy_buffer",
+    "habit_pressure",
+    "borderline_support",
+    "digital_burden"
+  ],
+  "all_features": [
+    "screen_time",
+    "app_usage",
+    "night_usage",
+    "unlock_count",
+    "notification_count",
+    "social_media_time",
+    "gaming_time",
+    "productivity_time",
+    "weekend_usage",
+    "stress_level",
+    "anxiety_level",
+    "depression_level",
+    "sleep_quality",
+    "work_productivity",
+    "social_interactions",
+    "physical_activity",
+    "age",
+    "gender",
+    "education",
+    "occupation_type",
+    "income_level",
+    "night_screen_ratio",
+    "social_screen_ratio",
+    "notifications_per_unlock",
+    "unlocks_per_hour",
+    "weekend_screen_ratio",
+    "sleep_deficit",
+    "wellbeing_strain",
+    "productivity_gap",
+    "social_intensity",
+    "compulsion_index",
+    "focus_balance",
+    "alert_fatigue",
+    "late_compulsion",
+    "screen_unlock_interaction",
+    "age_adjusted_usage",
+    "healthy_buffer",
+    "habit_pressure",
+    "borderline_support",
+    "recreation_share",
+    "digital_burden"
+  ],
+  "n_features": 41,
+  "selected_feature_count": 26,
+  "dataset_size": 10000,
+  "train_size": 8000,
+  "test_size": 2000,
+  "models": {
+    "Random Forest": {
+      "accuracy": 0.947,
+      "precision": 0.8649619365957931,
+      "recall": 0.8655,
+      "f1_score": 0.8647066460771886,
+      "macro_auc": 0.9693545100695894,
+      "cv_mean": 0.867625,
+      "cv_std": 0.009415744792633247
+    },
+    "Extra Trees": {
+      "accuracy": 0.941,
+      "precision": 0.8074072220447447,
+      "recall": 0.808,
+      "f1_score": 0.8031559002061055,
+      "macro_auc": 0.9526689443004205,
+      "cv_mean": 0.81275,
+      "cv_std": 0.006442049363362533
+    },
+    "SVM (RBF)": {
+      "accuracy": 0.953,
+      "precision": 0.875858318512952,
+      "recall": 0.8765,
+      "f1_score": 0.8760423496766637,
+      "macro_auc": 0.9701752638175272,
+      "cv_mean": 0.8855000000000001,
+      "cv_std": 0.004879805323985771
+    },
+    "Voting (Soft)": {
+      "accuracy": 0.959,
+      "precision": 0.8830046705480733,
+      "recall": 0.8835,
+      "f1_score": 0.883170299520121,
+      "macro_auc": 0.973884884119883,
+      "cv_mean": 0.8891249999999999,
+      "cv_std": 0.008316023689239936
+    },
+    "Stacking": {
+      "accuracy": 0.965,
+      "precision": 0.89054088387887,
+      "recall": 0.891,
+      "f1_score": 0.8906960578841177,
+      "macro_auc": 0.9758061673634767,
+      "cv_mean": 0.8957499999999999,
+      "cv_std": 0.00742041103982791
+    }
+  },
+  "scaler": "RobustScaler",
+  "feature_selector": "SelectKBest(mutual_info_classif)",
+  "preprocessing": {
+    "imputation": "median",
+    "outlier_control": "1st-99th percentile clipping",
+    "noise_reduction": "winsorized clipping + robust scaling",
+    "feature_engineering": true,
+    "borderline_support": true
+  },
+  "clip_bounds": {
+    "screen_time": {
+      "lower": 0.0,
+      "upper": 17.512986471146437
+    },
+    "app_usage": {
+      "lower": 0.0,
+      "upper": 12.926564027534448
+    },
+    "night_usage": {
+      "lower": 0.0,
+      "upper": 9.200839524748803
+    },
+    "unlock_count": {
+      "lower": 0.0,
+      "upper": 355.469953646045
+    },
+    "notification_count": {
+      "lower": 0.0,
+      "upper": 677.023674144856
+    },
+    "social_media_time": {
+      "lower": 0.0,
+      "upper": 9.991390042235764
+    },
+    "gaming_time": {
+      "lower": 0.0,
+      "upper": 6.199523303370538
+    },
+    "productivity_time": {
+      "lower": 0.0,
+      "upper": 3.8322305926791076
+    },
+    "weekend_usage": {
+      "lower": 0.0,
+      "upper": 19.774956728504
+    },
+    "stress_level": {
+      "lower": 1.0,
+      "upper": 6.0
+    },
+    "anxiety_level": {
+      "lower": 1.0,
+      "upper": 5.0
+    },
+    "depression_level": {
+      "lower": 1.0,
+      "upper": 5.0
+    },
+    "sleep_quality": {
+      "lower": 1.0,
+      "upper": 5.0
+    },
+    "work_productivity": {
+      "lower": 1.0,
+      "upper": 5.0
+    },
+    "social_interactions": {
+      "lower": 2.0,
+      "upper": 8.0
+    },
+    "physical_activity": {
+      "lower": 0.0,
+      "upper": 3.0
+    },
+    "age": {
+      "lower": 5.675927932449933,
+      "upper": 63.30119598697203
+    },
+    "gender": {
+      "lower": 0.0,
+      "upper": 1.0
+    },
+    "education": {
+      "lower": 2.0,
+      "upper": 5.0
+    },
+    "occupation_type": {
+      "lower": 1.0,
+      "upper": 3.0
+    },
+    "income_level": {
+      "lower": 2.0,
+      "upper": 5.0
+    }
+  },
+  "medians": {
+    "screen_time": 7.44620523568627,
+    "app_usage": 5.524478963822856,
+    "night_usage": 2.719625347633092,
+    "unlock_count": 137.3490255896835,
+    "notification_count": 288.45589003273176,
+    "social_media_time": 3.6962917209567987,
+    "gaming_time": 1.3291466439475195,
+    "productivity_time": 0.582835485839576,
+    "weekend_usage": 8.790148961972468,
+    "stress_level": 4.0,
+    "anxiety_level": 3.0,
+    "depression_level": 3.0,
+    "sleep_quality": 3.0,
+    "work_productivity": 3.0,
+    "social_interactions": 5.0,
+    "physical_activity": 1.0,
+    "age": 30.40191615975456,
+    "gender": 0.0,
+    "education": 3.0,
+    "occupation_type": 2.0,
+    "income_level": 3.0
+  },
+  "ranking_target": [
+    "Stacking",
+    "Voting (Soft)",
+    "SVM (RBF)",
+    "Random Forest",
+    "Extra Trees"
+  ],
+  "random_state": 42,
+  "evaluation_date": "2026-04-10T00:30:25.956921"
+}
