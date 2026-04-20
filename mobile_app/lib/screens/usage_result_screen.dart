@@ -274,7 +274,7 @@ class _UsageResultScreenState extends State<UsageResultScreen> {
                                 Text(
                                   appState.hasTodayPrediction
                                       ? 'Today\'s prediction is ready!'
-                                      : 'Prediction will be available at 6:00 AM',
+                                      : 'Prediction will be generated automatically near midnight',
                                   style: GoogleFonts.poppins(
                                     fontSize: 14,
                                     color: Colors.grey.shade600,

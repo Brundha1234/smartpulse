@@ -27,7 +27,7 @@ class UsageMonitorService {
   static bool _highUnlockAlertFired = false; // NEW
   static int _continuousMinutes = 0;
   static double _lastScreenTime = 0;
-  static DateTime? _lastPollTime;
+  static String? _lastUsageDateKey;
 
   static const int _defaultGoalHours = 4;
   static const int _notifCountThreshold = 200; // warn at 200 notifications/day
@@ -58,7 +58,7 @@ class UsageMonitorService {
     _highUnlockAlertFired = false;
     _continuousMinutes = 0;
     _lastScreenTime = 0;
-    _lastPollTime = null;
+    _lastUsageDateKey = null;
   }
 
   static void resetDailyFlags() {
@@ -68,29 +68,6 @@ class UsageMonitorService {
     _highNotifAlertFired = false;
     _highUnlockAlertFired = false;
     _continuousMinutes = 0;
-  }
-
-  // Reset actual usage counters at 6:01 AM for new 24-hour period
-  static Future<void> resetDailyCounters() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-
-      // Reset notification and unlock counters for new 24-hour period
-      await prefs.setInt('notification_count', 0);
-      await prefs.setString('last_notification_date',
-          DateTime.now().toIso8601String().split('T')[0]);
-      await prefs.setInt('unlock_count', 0);
-      await prefs.setString(
-          'last_unlock_date', DateTime.now().toIso8601String().split('T')[0]);
-
-      // Reset alert flags
-      resetDailyFlags();
-
-      debugPrint(
-          '[UsageMonitor] Daily counters reset at 6:01 AM for new 24-hour period');
-    } catch (e) {
-      debugPrint('[UsageMonitor] Error resetting daily counters: $e');
-    }
   }
 
   // ── Main poll ─────────────────────────────────────────────────────────
@@ -105,28 +82,22 @@ class UsageMonitorService {
         prefs.getInt('unlock_threshold') ?? _unlockCountThreshold;
 
     final now = DateTime.now();
-    final today6AM = DateTime(now.year, now.month, now.day, 6, 0, 0);
-    final yesterday6AM = DateTime(now.year, now.month, now.day - 1, 6, 0, 0);
-    final lastPoll = _lastPollTime;
-
-    // Reset daily flags if it's a new 24-hour period (6 AM boundary)
-    if (lastPoll != null) {
-      if (now.hour >= 6 && lastPoll.isBefore(today6AM)) {
-        // After 6 AM and last poll was before today's 6 AM
-        resetDailyFlags();
-      } else if (now.hour < 6 && lastPoll.isBefore(yesterday6AM)) {
-        // Before 6 AM and last poll was before yesterday's 6 AM
-        resetDailyFlags();
-      }
-    }
-    _lastPollTime = now;
 
     // Get real usage data
     UsageData usage;
     try {
       final usageStats = await UsageService.getUsageStatistics();
+      final usageDate = _usageBucketDate(usageStats);
+      final usageDateKey = _dateKeyFor(usageDate);
+
+      if (_lastUsageDateKey != null && _lastUsageDateKey != usageDateKey) {
+        resetDailyFlags();
+        _lastScreenTime = 0;
+      }
+      _lastUsageDateKey = usageDateKey;
+
       usage = UsageData(
-        date: DateTime.now(),
+        date: usageDate,
         screenTime:
             ((usageStats['total_screen_time_minutes'] as num?)?.toDouble() ??
                     0.0) /
@@ -307,5 +278,20 @@ class UsageMonitorService {
 
     return directPackages.contains(normalized) ||
         fragments.any(normalized.contains);
+  }
+
+  static DateTime _usageBucketDate(Map<String, dynamic> usageStats) {
+    final sessionStart = DateTime.tryParse(
+      usageStats['tracking_session_start']?.toString() ?? '',
+    );
+    final value = sessionStart ?? DateTime.now();
+    return DateTime(value.year, value.month, value.day);
+  }
+
+  static String _dateKeyFor(DateTime date) {
+    return DateTime(date.year, date.month, date.day)
+        .toIso8601String()
+        .split('T')
+        .first;
   }
 }

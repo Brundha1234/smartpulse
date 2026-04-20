@@ -39,7 +39,6 @@ object SmartPulseUsageRepository {
     private const val LAST_KEYGUARD_LOCKED_KEY = "last_keyguard_locked"
     private const val NOTIFICATION_TOTAL_KEY = "notification_total"
     private const val NOTIFICATION_BY_APP_KEY = "notification_by_app"
-    private const val SESSION_DURATION_MS = 24L * 60L * 60L * 1000L
     private const val UNLOCK_DEDUP_WINDOW_MS = 1500L
 
     private val excludedPackages = setOf(
@@ -151,7 +150,11 @@ object SmartPulseUsageRepository {
 
     fun resetCounters(context: Context) {
         ensureRepositoryState(context)
-        ensureTrackingSession(context, forceNewSession = true)
+        ensureTrackingSession(
+            context,
+            forceNewSession = true,
+            startAtDayBoundary = true
+        )
         mirrorFlutterInt(context, "unlock_count", 0)
         mirrorFlutterInt(context, "notification_count", 0)
     }
@@ -166,7 +169,7 @@ object SmartPulseUsageRepository {
         }
 
         val sessionStart = ensureTrackingSession(context, forceNewSession = false)
-        val sessionEnd = sessionStart + SESSION_DURATION_MS
+        val sessionEnd = sessionEndFor(sessionStart)
         val now = minOf(System.currentTimeMillis(), sessionEnd)
         val prefs = prefs(context)
         var lastEventTs = prefs.getLong(LAST_EVENT_TIMESTAMP_KEY, sessionStart)
@@ -265,11 +268,11 @@ object SmartPulseUsageRepository {
         } else {
             0L
         }
-        val sessionEnd = if (sessionStart > 0L) sessionStart + SESSION_DURATION_MS else 0L
+        val sessionEnd = if (sessionStart > 0L) sessionEndFor(sessionStart) else 0L
         val effectiveEnd = if (sessionStart > 0L) minOf(now, sessionEnd) else now
-        val sessionComplete = sessionStart > 0L && now >= sessionEnd
+        val sessionComplete = false
 
-        if (trackingEnabled) {
+        if (trackingEnabled && !sessionComplete) {
             updateUnlockStateFromKeyguard(context)
         }
 
@@ -292,17 +295,34 @@ object SmartPulseUsageRepository {
             }
             nightUsageMs = usageComputation.nightUsageMs
 
-            val exactAggregateUsage = queryAggregateUsageDelta(
-                context = context,
-                sessionStart = sessionStart,
-                end = effectiveEnd
-            )
-            exactAggregateUsage.forEach { (packageName, aggregateForegroundMs) ->
-                val currentValue = usageByApp[packageName] ?: 0L
-                if (aggregateForegroundMs > currentValue) {
-                    usageByApp[packageName] = aggregateForegroundMs
-                }
-            }
+              val exactAggregateUsage = queryAggregateUsageDelta(
+                  context = context,
+                  sessionStart = sessionStart,
+                  end = effectiveEnd
+              )
+              val aggregateTotalMs = exactAggregateUsage.values.sum()
+              val eventTotalMs = usageByApp.values.sum()
+              val elapsedSessionMs = maxOf(0L, effectiveEnd - sessionStart)
+              val maxPlausibleAggregateMs = elapsedSessionMs + (2 * 60 * 1000L)
+              val aggregateDeltaMs = maxOf(0L, aggregateTotalMs - eventTotalMs)
+              val maxAllowedSupplementMs = 15 * 60 * 1000L
+
+              if (
+                  aggregateTotalMs in eventTotalMs..maxPlausibleAggregateMs &&
+                  aggregateDeltaMs <= maxAllowedSupplementMs
+              ) {
+                  exactAggregateUsage.forEach { (packageName, aggregateForegroundMs) ->
+                      val currentValue = usageByApp[packageName] ?: return@forEach
+                      if (aggregateForegroundMs > currentValue) {
+                          usageByApp[packageName] = aggregateForegroundMs
+                      }
+                  }
+              } else if (aggregateTotalMs > 0L) {
+                  Log.w(
+                      TAG,
+                      "Ignoring aggregate supplement total=${aggregateTotalMs / 60000}m event=${eventTotalMs / 60000}m delta=${aggregateDeltaMs / 60000}m session=${elapsedSessionMs / 60000}m"
+                  )
+              }
         }
         val usageEntries = usageByApp.entries
             .filter { it.value > 0L }
@@ -394,7 +414,7 @@ object SmartPulseUsageRepository {
             "query_period" to mapOf(
                 "start" to if (sessionStart > 0L) isoString(sessionStart) else null,
                 "end" to if (sessionStart > 0L) isoString(effectiveEnd) else null,
-                "description" to "Active 24-hour tracking session"
+                "description" to "Current calendar-day sensing window"
             ),
             "data_quality" to if (status == "ok") "native_foreground_service" else status,
             "last_updated" to isoString(now)
@@ -407,31 +427,38 @@ object SmartPulseUsageRepository {
         return snapshot
     }
 
-    private fun ensureTrackingSession(context: Context, forceNewSession: Boolean): Long {
+    private fun ensureTrackingSession(
+        context: Context,
+        forceNewSession: Boolean,
+        startAtDayBoundary: Boolean = false
+    ): Long {
         ensureRepositoryState(context)
-        val prefs = prefs(context)
         val now = System.currentTimeMillis()
+        val prefs = prefs(context)
         val existingStart = prefs.getLong(TRACKING_SESSION_START_KEY, 0L)
-        val needsNewSession =
-            forceNewSession || existingStart <= 0L || now >= existingStart + SESSION_DURATION_MS
 
-        if (!needsNewSession) {
+        if (!forceNewSession && existingStart > 0L && now < sessionEndFor(existingStart)) {
             return existingStart
         }
 
+        val sessionStart = when {
+            startAtDayBoundary -> startOfDayEpoch(now)
+            forceNewSession -> now
+            else -> startOfDayEpoch(now)
+        }
         val editor = prefs.edit()
         clearSessionData(editor)
         editor
-            .putLong(TRACKING_SESSION_START_KEY, now)
-            .putLong(LAST_EVENT_TIMESTAMP_KEY, now)
+            .putLong(TRACKING_SESSION_START_KEY, sessionStart)
+            .putLong(LAST_EVENT_TIMESTAMP_KEY, sessionStart)
             .putBoolean(LAST_KEYGUARD_LOCKED_KEY, currentKeyguardLocked(context))
             .putBoolean(USAGE_PERMISSION_SESSION_ALIGNED_KEY, false)
             .apply()
 
         mirrorFlutterInt(context, "unlock_count", 0)
         mirrorFlutterInt(context, "notification_count", 0)
-        Log.d(TAG, "Started new tracking session at $now")
-        return now
+        Log.d(TAG, "Started new tracking day at $sessionStart")
+        return sessionStart
     }
 
     private fun computeUsageFromEvents(
@@ -702,17 +729,16 @@ object SmartPulseUsageRepository {
             return ensureTrackingSession(context, forceNewSession = false)
         }
 
+        val sessionStart = ensureTrackingSession(context, forceNewSession = false)
         val aligned = prefs.getBoolean(USAGE_PERMISSION_SESSION_ALIGNED_KEY, false)
-        val sessionStart = if (aligned) {
-            ensureTrackingSession(context, forceNewSession = false)
-        } else {
-            ensureTrackingSession(context, forceNewSession = true).also {
-                captureAggregateBaseline(context, it)
-                prefs.edit().putBoolean(USAGE_PERMISSION_SESSION_ALIGNED_KEY, true).apply()
-            }
+        if (!aligned) {
+            captureAggregateBaseline(context, sessionStart)
+            prefs.edit().putBoolean(USAGE_PERMISSION_SESSION_ALIGNED_KEY, true).apply()
         }
 
-        if (!prefs.contains(AGGREGATE_BASELINE_USAGE_KEY)) {
+        if (!prefs.contains(AGGREGATE_BASELINE_USAGE_KEY) ||
+            prefs.getLong(AGGREGATE_BASELINE_DAY_START_KEY, -1L) != startOfDayEpoch(sessionStart)
+        ) {
             captureAggregateBaseline(context, sessionStart)
         }
         return sessionStart
@@ -770,21 +796,37 @@ object SmartPulseUsageRepository {
                 start,
                 end
             )
+            val latestBuckets = mutableMapOf<String, Pair<Long, Long>>()
+            usageStats.orEmpty().forEach { stats ->
+                val packageName = stats.packageName ?: return@forEach
+                if (!shouldIncludeApp(context, packageName)) {
+                    return@forEach
+                }
+                if (stats.lastTimeStamp <= start || stats.firstTimeStamp >= end) {
+                    return@forEach
+                }
+                val foregroundMs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    maxOf(stats.totalTimeInForeground, stats.totalTimeVisible)
+                } else {
+                    stats.totalTimeInForeground
+                }
+                if (foregroundMs <= 0L) {
+                    return@forEach
+                }
+
+                val existing = latestBuckets[packageName]
+                val shouldReplace = existing == null ||
+                    stats.lastTimeStamp > existing.first ||
+                    (stats.lastTimeStamp == existing.first && foregroundMs > existing.second)
+
+                if (shouldReplace) {
+                    latestBuckets[packageName] = stats.lastTimeStamp to foregroundMs
+                }
+            }
+
             buildMap {
-                usageStats.orEmpty().forEach { stats ->
-                    val packageName = stats.packageName ?: return@forEach
-                    if (!shouldIncludeApp(context, packageName)) {
-                        return@forEach
-                    }
-                    val foregroundMs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        maxOf(stats.totalTimeInForeground, stats.totalTimeVisible)
-                    } else {
-                        stats.totalTimeInForeground
-                    }
-                    if (foregroundMs > 0L) {
-                        val currentValue = this[packageName] ?: 0L
-                        put(packageName, maxOf(currentValue, foregroundMs))
-                    }
+                latestBuckets.forEach { (packageName, bucket) ->
+                    put(packageName, bucket.second)
                 }
             }
         } catch (error: Exception) {
@@ -947,6 +989,20 @@ object SmartPulseUsageRepository {
     private fun startOfDayEpoch(timeMillis: Long): Long {
         return Calendar.getInstance().apply {
             timeInMillis = timeMillis
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    }
+
+    private fun sessionEndFor(sessionStart: Long): Long {
+        if (sessionStart <= 0L) {
+            return 0L
+        }
+        return Calendar.getInstance().apply {
+            timeInMillis = sessionStart
+            add(Calendar.DAY_OF_YEAR, 1)
             set(Calendar.HOUR_OF_DAY, 0)
             set(Calendar.MINUTE, 0)
             set(Calendar.SECOND, 0)

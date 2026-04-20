@@ -6,11 +6,15 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/prediction_result.dart';
 
 class ApiService {
   static const String _configuredBaseUrl =
       String.fromEnvironment('SMARTPULSE_API_URL', defaultValue: '');
+  static const String _cachedBaseUrlKey = 'smartpulse_cached_backend_url';
+  static const Duration _probeTimeout = Duration(milliseconds: 900);
+  static const Duration _requestTimeout = Duration(seconds: 8);
 
   // Configurable backend URL with fallbacks
   static String _baseUrl = _configuredBaseUrl.isNotEmpty
@@ -27,51 +31,13 @@ class ApiService {
       return;
     }
 
-    // First try to auto-detect common gateway IPs
-    final gatewayUrls = await _getPossibleGatewayUrls();
-
-    // Combine with fallback URLs
-    final urls = [
-      ...gatewayUrls,
-      'http://127.0.0.1:3000',
-      'http://localhost:3000',
-      'http://10.0.2.2:3000',
-      'http://10.0.0.2:3000',
-      'http://127.0.0.1:5000', // Local backend - for testing on laptop
-      'http://localhost:5000', // Localhost alternative
-      'http://192.168.1.100:5000', // Common home network
-      'http://192.168.0.100:5000', // Alternative home network
-      'http://10.0.0.2:5000', // Alternative WiFi IP
-      'http://10.0.2.2:5000', // Android emulator to host
-      'http://172.16.0.1:5000', // VPN network
-      'http://169.254.0.1:5000', // Link-local
-    ];
-
-    for (String url in urls) {
-      try {
-        // Trying to connect to: $url
-        final response = await http
-            .get(Uri.parse('$url/'))
-            .timeout(const Duration(seconds: 5));
-        if (response.statusCode == 200) {
-          _baseUrl = url;
-          // Connected to backend: $url
-          return;
-        }
-      } catch (e) {
-        // Failed to connect to $url: $e
-        continue;
-      }
+    final cachedUrl = await _loadCachedBaseUrl();
+    if (cachedUrl != null && await _isBackendReachable(cachedUrl)) {
+      _baseUrl = cachedUrl;
+      return;
     }
-    // No backend connection found. Using default: $_baseUrl
-    //   1. Backend server is running (python app.py)
-    //   2. Device and computer are on same WiFi network
-    //   3. Firewall is not blocking port 5000
-    //   4. Update YOUR_COMPUTER_IP in api_service.dart
-    //   5. Your computer IP: ${await _getLocalIP()}
 
-    // Keep trying - don't fall back to demo mode
-    // Will keep trying to connect...
+    await _discoverBackendUrl(includeSubnetScan: false);
   }
 
   // Auto-detect possible gateway URLs based on network interfaces
@@ -137,6 +103,260 @@ class ApiService {
     return null;
   }
 
+  static Future<String?> _loadCachedBaseUrl() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(_cachedBaseUrlKey);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> _saveCachedBaseUrl(String url) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_cachedBaseUrlKey, url);
+    } catch (_) {
+      // Best-effort cache only.
+    }
+  }
+
+  static Future<void> _rememberWorkingUrl(String url) async {
+    _baseUrl = url;
+    await _saveCachedBaseUrl(url);
+  }
+
+  static Future<bool> _isBackendReachable(String url) async {
+    try {
+      final response =
+          await http.get(Uri.parse('$url/')).timeout(_probeTimeout);
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<String?> _probeCandidate(String url) async {
+    final reachable = await _isBackendReachable(url);
+    return reachable ? url : null;
+  }
+
+  static Future<String?> _findFirstReachable(
+    List<String> urls, {
+    int batchSize = 12,
+  }) async {
+    final uniqueUrls = <String>{};
+    final candidates = <String>[];
+
+    for (final url in urls) {
+      final normalized = url.trim();
+      if (normalized.isEmpty || !uniqueUrls.add(normalized)) {
+        continue;
+      }
+      candidates.add(normalized);
+    }
+
+    for (var i = 0; i < candidates.length; i += batchSize) {
+      final batch = candidates.skip(i).take(batchSize);
+      final results = await Future.wait(batch.map(_probeCandidate));
+      for (final result in results) {
+        if (result != null) {
+          return result;
+        }
+      }
+    }
+    return null;
+  }
+
+  static Future<List<String>> _buildQuickCandidateUrls({
+    List<String> preferredUrls = const [],
+    Set<String> excludeUrls = const {},
+  }) async {
+    final gatewayUrls = await _getPossibleGatewayUrls();
+    final cachedUrl = await _loadCachedBaseUrl();
+
+    final urls = <String>[
+      ...preferredUrls,
+      if (cachedUrl != null) cachedUrl,
+      _baseUrl,
+      if (_configuredBaseUrl.isNotEmpty) _configuredBaseUrl,
+      ...gatewayUrls,
+      'http://127.0.0.1:3000',
+      'http://localhost:3000',
+      'http://10.0.2.2:3000',
+      'http://10.0.0.2:3000',
+      'http://127.0.0.1:5000',
+      'http://localhost:5000',
+      'http://10.0.0.2:5000',
+      'http://10.0.2.2:5000',
+      'http://192.168.1.100:5000',
+      'http://192.168.0.100:5000',
+      'http://192.168.1.101:5000',
+      'http://192.168.0.101:5000',
+      'http://10.0.3.191:5000',
+      'http://10.0.12.163:5000',
+      'http://172.16.0.1:5000',
+      'http://169.254.0.1:5000',
+    ];
+
+    return urls
+        .where((url) => url.isNotEmpty && !excludeUrls.contains(url))
+        .toList();
+  }
+
+  static List<String> _buildSubnetScanUrls(String ip) {
+    final parts = ip.split('.');
+    if (parts.length != 4) {
+      return const [];
+    }
+
+    final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+    final selfHost = int.tryParse(parts[3]);
+    final urls = <String>[];
+
+    for (var host = 2; host <= 254; host++) {
+      if (host == selfHost) {
+        continue;
+      }
+      urls.add('http://$prefix.$host:5000');
+      urls.add('http://$prefix.$host:3000');
+    }
+
+    return urls;
+  }
+
+  static Future<List<String>> _buildSubnetCandidates({
+    Set<String> excludeUrls = const {},
+  }) async {
+    final urls = <String>[];
+
+    try {
+      final interfaces = await NetworkInterface.list(
+        includeLoopback: false,
+        includeLinkLocal: false,
+      );
+
+      for (final interface in interfaces) {
+        for (final addr in interface.addresses) {
+          if (addr.type != InternetAddressType.IPv4) {
+            continue;
+          }
+
+          final ip = addr.address;
+          if (!(ip.startsWith('192.168.') ||
+              ip.startsWith('10.') ||
+              ip.startsWith('172.16.') ||
+              ip.startsWith('172.17.') ||
+              ip.startsWith('172.18.') ||
+              ip.startsWith('172.19.') ||
+              ip.startsWith('172.2') ||
+              ip.startsWith('172.30.') ||
+              ip.startsWith('172.31.'))) {
+            continue;
+          }
+
+          urls.addAll(_buildSubnetScanUrls(ip));
+        }
+      }
+    } catch (e) {
+      print('⚠️ Error building subnet candidates: $e');
+    }
+
+    return urls.where((url) => !excludeUrls.contains(url)).toList();
+  }
+
+  static Future<bool> ensureBackendAvailable({
+    bool includeSubnetScan = false,
+    Set<String> excludeUrls = const {},
+    List<String> preferredUrls = const [],
+  }) async {
+    if (_configuredBaseUrl.isNotEmpty &&
+        !excludeUrls.contains(_configuredBaseUrl) &&
+        await _isBackendReachable(_configuredBaseUrl)) {
+      await _rememberWorkingUrl(_configuredBaseUrl);
+      return true;
+    }
+
+    if (!excludeUrls.contains(_baseUrl) &&
+        await _isBackendReachable(_baseUrl)) {
+      await _rememberWorkingUrl(_baseUrl);
+      return true;
+    }
+
+    final discovered = await _discoverBackendUrl(
+      includeSubnetScan: includeSubnetScan,
+      excludeUrls: excludeUrls,
+      preferredUrls: preferredUrls,
+    );
+    return discovered != null;
+  }
+
+  static Future<String?> _discoverBackendUrl({
+    bool includeSubnetScan = false,
+    Set<String> excludeUrls = const {},
+    List<String> preferredUrls = const [],
+  }) async {
+    final quickCandidates = await _buildQuickCandidateUrls(
+      preferredUrls: preferredUrls,
+      excludeUrls: excludeUrls,
+    );
+    final quickMatch = await _findFirstReachable(quickCandidates);
+    if (quickMatch != null) {
+      await _rememberWorkingUrl(quickMatch);
+      return quickMatch;
+    }
+
+    if (!includeSubnetScan) {
+      return null;
+    }
+
+    final subnetCandidates =
+        await _buildSubnetCandidates(excludeUrls: excludeUrls);
+    final subnetMatch =
+        await _findFirstReachable(subnetCandidates, batchSize: 20);
+    if (subnetMatch != null) {
+      await _rememberWorkingUrl(subnetMatch);
+      return subnetMatch;
+    }
+
+    return null;
+  }
+
+  Future<http.Response> _postWithBackendRecovery(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    await ensureBackendAvailable(includeSubnetScan: false);
+
+    try {
+      return await http
+          .post(
+            Uri.parse('$_baseUrl$path'),
+            headers: {'Content-Type': 'application/json'},
+            body: json.encode(body),
+          )
+          .timeout(_requestTimeout);
+    } catch (error) {
+      final failedUrl = _baseUrl;
+      final recovered = await _discoverBackendUrl(
+        includeSubnetScan: true,
+        excludeUrls: {failedUrl},
+      );
+
+      if (recovered == null) {
+        rethrow;
+      }
+
+      return http
+          .post(
+            Uri.parse('$recovered$path'),
+            headers: {'Content-Type': 'application/json'},
+            body: json.encode(body),
+          )
+          .timeout(_requestTimeout);
+    }
+  }
+
   String? _token;
 
   void setToken(String token) {
@@ -151,12 +371,16 @@ class ApiService {
   // Check if backend is available
   static Future<bool> checkBackendConnection() async {
     try {
+      final available =
+          await ensureBackendAvailable(includeSubnetScan: false) ||
+              await ensureBackendAvailable(includeSubnetScan: true);
+      if (!available) {
+        return false;
+      }
+
       print('🔍 Checking backend connection to: $_baseUrl');
-      final response = await http
-          .get(
-            Uri.parse('$_baseUrl/'),
-          )
-          .timeout(const Duration(seconds: 5));
+      final response =
+          await http.get(Uri.parse('$_baseUrl/')).timeout(_probeTimeout);
 
       print('📡 Backend response status: ${response.statusCode}');
       if (response.statusCode == 200) {
@@ -178,13 +402,8 @@ class ApiService {
 
     while (retryCount <= maxRetries) {
       try {
-        final response = await http
-            .post(
-              Uri.parse('$_baseUrl/auth/register'),
-              headers: {'Content-Type': 'application/json'},
-              body: json.encode(userData),
-            )
-            .timeout(const Duration(seconds: 15));
+        final response =
+            await _postWithBackendRecovery('/auth/register', userData);
 
         final responseData = json.decode(response.body);
 
@@ -224,19 +443,15 @@ class ApiService {
   Future<Map<String, dynamic>> login(String email, String password) async {
     const maxRetries = 2;
     int retryCount = 0;
+    final requestBody = {
+      'email': email,
+      'password': password,
+    };
 
     while (retryCount <= maxRetries) {
       try {
-        final response = await http
-            .post(
-              Uri.parse('$_baseUrl/auth/login'),
-              headers: {'Content-Type': 'application/json'},
-              body: json.encode({
-                'email': email,
-                'password': password,
-              }),
-            )
-            .timeout(const Duration(seconds: 15));
+        final response =
+            await _postWithBackendRecovery('/auth/login', requestBody);
 
         final responseData = json.decode(response.body);
 

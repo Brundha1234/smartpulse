@@ -149,9 +149,10 @@ class AppState extends ChangeNotifier {
 
       final usageData = await AutoSensingService.forceRefresh();
       _syncTrackingSessionMeta(usageData);
+      final usageDate = _usageBucketDate(usageData);
 
       _todayUsage = UsageData(
-        date: DateTime.now(),
+        date: usageDate,
         screenTime:
             ((usageData['total_screen_time_minutes'] as num?)?.toDouble() ??
                     0.0) /
@@ -229,10 +230,11 @@ class AppState extends ChangeNotifier {
       // Get today's existing usage statistics from Android immediately
       final existingData = await AutoSensingService.forceRefresh();
       _syncTrackingSessionMeta(existingData);
+      final usageDate = _usageBucketDate(existingData);
 
       // Update today's usage with real Android data immediately
       _todayUsage = UsageData(
-        date: DateTime.now(),
+        date: usageDate,
         screenTime:
             ((existingData['total_screen_time_minutes'] as num?)?.toDouble() ??
                     0.0) /
@@ -333,8 +335,7 @@ class AppState extends ChangeNotifier {
 
   // Get today's prediction
   PredictionResult? get todayPrediction {
-    final today = DateTime.now().toIso8601String().split('T')[0];
-    return _dailyPredictions[today];
+    return _dailyPredictions[_dateKeyFor(_todayUsage.date)];
   }
 
   // Check if today's prediction is ready
@@ -343,10 +344,18 @@ class AppState extends ChangeNotifier {
   Future<void> runDailyPrediction({
     BuildContext? context,
     bool rotateSessionAfterPrediction = false,
+    bool syncFromSensors = true,
+    String? recordKeyOverride,
+    String? predictedSessionStart,
+    UsageData? usageOverride,
   }) async {
-    await _syncTodayUsageFromSensors();
+    if (syncFromSensors) {
+      await _syncTodayUsageFromSensors();
+    }
 
-    if (_todayUsage.screenTime == 0) {
+    final usageForPrediction = usageOverride ?? _todayUsage;
+
+    if (usageForPrediction.screenTime == 0) {
       if (context != null) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -365,37 +374,38 @@ class AppState extends ChangeNotifier {
 
     try {
       // Calculate social app usage
-      final socialAppHours = _todayUsage.appBreakdown.entries
+      final socialAppHours = usageForPrediction.appBreakdown.entries
               .where((entry) => _isSocialApp(entry.key))
               .fold(0.0, (sum, entry) => sum + entry.value) /
           60.0;
 
       // Get prediction using our new PredictionService
       final prediction = await PredictionService.generatePrediction(
-        screenTimeHours: _todayUsage.screenTime,
+        screenTimeHours: usageForPrediction.screenTime,
         socialAppHours: socialAppHours,
-        nightUsageHours: _todayUsage.nightUsage,
-        unlockCount: _todayUsage.unlockCount,
-        notificationCount: _todayUsage.notificationCount,
+        nightUsageHours: usageForPrediction.nightUsage,
+        unlockCount: usageForPrediction.unlockCount,
+        notificationCount: usageForPrediction.notificationCount,
+        appBreakdown: usageForPrediction.appBreakdown,
         stressLevel: _stress,
         anxietyLevel: _anxiety,
         depressionLevel: _depression,
       );
 
-      // Store prediction with today's date
-      final recordKey = _predictionRecordKey();
+      final recordKey = recordKeyOverride ?? _predictionRecordKey();
       _dailyPredictions[recordKey] = prediction;
-      _dailyUsageData[recordKey] = _todayUsage;
+      _dailyUsageData[recordKey] = usageForPrediction;
       _lastPrediction = prediction;
       _history.insert(0, prediction);
       _predictionStatus = PredictionStatus.success;
-      _lastPredictedSessionStart = _activeTrackingSessionStart;
+      _lastPredictedSessionStart =
+          predictedSessionStart ?? _activeTrackingSessionStart ?? recordKey;
 
       // Save daily predictions and usage data to storage
       await _saveDailyPredictions();
       await _saveDailyUsageData();
       await _saveLastPredictedSessionStart();
-      await _savePredictionToBackend(prediction, _todayUsage);
+      await _savePredictionToBackend(prediction, usageForPrediction);
 
       if (prediction.addictionLevel == 'High') {
         await NotificationService.sendHighRiskAlert(
@@ -494,28 +504,78 @@ class AppState extends ChangeNotifier {
     final usageSaved = p.getString('daily_usage_data');
     if (usageSaved != null) {
       final Map<String, dynamic> usageJson = json.decode(usageSaved);
-      _dailyUsageData = usageJson
-          .map((key, value) => MapEntry(key, UsageData.fromJson(value)));
+      _dailyUsageData = usageJson.map((key, value) {
+        final parsedUsage = UsageData.fromJson(value);
+        final keyDate = _dateFromKey(key) ??
+            DateTime(
+              parsedUsage.date.year,
+              parsedUsage.date.month,
+              parsedUsage.date.day,
+            );
+        return MapEntry(
+          key,
+          UsageData(
+            date: keyDate,
+            screenTime: parsedUsage.screenTime,
+            appUsage: parsedUsage.appUsage,
+            nightUsage: parsedUsage.nightUsage,
+            unlockCount: parsedUsage.unlockCount,
+            notificationCount: parsedUsage.notificationCount,
+            appBreakdown: Map<String, double>.from(parsedUsage.appBreakdown),
+            hasPermission: parsedUsage.hasPermission,
+          ),
+        );
+      });
     }
   }
 
   // Populate weekly usage data with historical values
   Future<void> _populateWeeklyUsageData() async {
-    final now = DateTime.now();
-    _weeklyUsage = [_todayUsage]; // Start with today
+    final today = DateTime(
+      _todayUsage.date.year,
+      _todayUsage.date.month,
+      _todayUsage.date.day,
+    );
+    final earliestIncluded = today.subtract(const Duration(days: 6));
+    final weeklyByKey = <String, UsageData>{};
 
-    // Add the last 6 days only when we have stored real data.
-    for (int i = 1; i <= 6; i++) {
-      final date = now.subtract(Duration(days: i));
-      final dateKey = date.toIso8601String().split('T')[0];
-
-      if (_dailyUsageData.containsKey(dateKey)) {
-        _weeklyUsage.add(_dailyUsageData[dateKey]!);
+    for (final entry in _dailyUsageData.entries) {
+      final usage = entry.value;
+      final normalizedDate = _dateFromKey(entry.key) ??
+          DateTime(
+            usage.date.year,
+            usage.date.month,
+            usage.date.day,
+          );
+      if (normalizedDate.isBefore(earliestIncluded) ||
+          normalizedDate.isAfter(today)) {
+        continue;
       }
+      weeklyByKey[entry.key] = UsageData(
+        date: normalizedDate,
+        screenTime: usage.screenTime,
+        appUsage: usage.appUsage,
+        nightUsage: usage.nightUsage,
+        unlockCount: usage.unlockCount,
+        notificationCount: usage.notificationCount,
+        appBreakdown: Map<String, double>.from(usage.appBreakdown),
+        hasPermission: usage.hasPermission,
+      );
     }
 
-    // Sort by date (oldest first)
-    _weeklyUsage.sort((a, b) => a.date.compareTo(b.date));
+    weeklyByKey[_dateKeyFor(today)] = UsageData(
+      date: today,
+      screenTime: _todayUsage.screenTime,
+      appUsage: _todayUsage.appUsage,
+      nightUsage: _todayUsage.nightUsage,
+      unlockCount: _todayUsage.unlockCount,
+      notificationCount: _todayUsage.notificationCount,
+      appBreakdown: Map<String, double>.from(_todayUsage.appBreakdown),
+      hasPermission: _todayUsage.hasPermission,
+    );
+
+    _weeklyUsage = weeklyByKey.values.toList()
+      ..sort((a, b) => a.date.compareTo(b.date));
   }
 
   Future<void> _persistCurrentUsageSnapshot() async {
@@ -523,17 +583,7 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    final hasAnyData = _todayUsage.screenTime > 0 ||
-        _todayUsage.appUsage > 0 ||
-        _todayUsage.nightUsage > 0 ||
-        _todayUsage.unlockCount > 0 ||
-        _todayUsage.notificationCount > 0 ||
-        _todayUsage.appBreakdown.isNotEmpty;
-    if (!hasAnyData) {
-      return;
-    }
-
-    final calendarKey = DateTime.now().toIso8601String().split('T').first;
+    final calendarKey = _dateKeyFor(_todayUsage.date);
     _dailyUsageData[calendarKey] = UsageData(
       date: DateTime(
         _todayUsage.date.year,
@@ -555,7 +605,6 @@ class AppState extends ChangeNotifier {
   Future<void> _resetDailyCountsAfterPrediction() async {
     try {
       UsageMonitorService.resetDailyFlags();
-      await AutoSensingService.resetDailyCounts();
       _activeTrackingSessionStart = null;
       _activeTrackingSessionEnd = null;
       await refreshUsage();
@@ -580,7 +629,8 @@ class AppState extends ChangeNotifier {
 
   Future<void> _loadTrackingSessionState() async {
     final prefs = await SharedPreferences.getInstance();
-    _lastPredictedSessionStart = prefs.getString('last_predicted_session_start');
+    _lastPredictedSessionStart =
+        prefs.getString('last_predicted_session_start');
   }
 
   Future<void> _saveLastPredictedSessionStart() async {
@@ -606,10 +656,9 @@ class AppState extends ChangeNotifier {
   }
 
   String _predictionRecordKey() {
-    final end = DateTime.tryParse(
-        (_usageDataSessionEnd() ?? DateTime.now().toIso8601String()));
-    final date = end ?? DateTime.now();
-    return date.toIso8601String().split('T').first;
+    final start = _trackingSessionLocalDateTime(_activeTrackingSessionStart) ??
+        _todayUsage.date;
+    return _dateKeyFor(start);
   }
 
   String? _usageDataSessionEnd() {
@@ -620,8 +669,9 @@ class AppState extends ChangeNotifier {
     try {
       final usageData = await AutoSensingService.forceRefresh();
       _syncTrackingSessionMeta(usageData);
+      final usageDate = _usageBucketDate(usageData);
       _todayUsage = UsageData(
-        date: DateTime.now(),
+        date: usageDate,
         screenTime:
             ((usageData['total_screen_time_minutes'] as num?)?.toDouble() ??
                     0.0) /
@@ -682,19 +732,49 @@ class AppState extends ChangeNotifier {
     return socialMinutes / 60.0;
   }
 
+  DateTime _usageBucketDate(Map<String, dynamic> usageData) {
+    final sessionStart = _trackingSessionLocalDateTime(
+      usageData['tracking_session_start']?.toString(),
+    );
+    final value = sessionStart ?? DateTime.now();
+    return DateTime(value.year, value.month, value.day);
+  }
+
+  String _dateKeyFor(DateTime date) {
+    return DateTime(date.year, date.month, date.day)
+        .toIso8601String()
+        .split('T')
+        .first;
+  }
+
+  DateTime? _trackingSessionLocalDateTime(String? rawValue) {
+    if (rawValue == null || rawValue.isEmpty) {
+      return null;
+    }
+    final parsed = DateTime.tryParse(rawValue);
+    if (parsed == null) {
+      return null;
+    }
+    return parsed.isUtc ? parsed.toLocal() : parsed;
+  }
+
+  DateTime? _dateFromKey(String key) {
+    final parsed = DateTime.tryParse(key);
+    if (parsed == null) {
+      return null;
+    }
+    return DateTime(parsed.year, parsed.month, parsed.day);
+  }
+
   void _scheduleTrackingSessionPrediction(Map<String, dynamic> usageData) {
     _sessionPredictionTimer?.cancel();
+    _dailyPredictionTimer?.cancel();
 
     final sessionEnd =
         DateTime.tryParse(usageData['tracking_session_end']?.toString() ?? '');
     final sessionStart = usageData['tracking_session_start']?.toString();
-    final complete = usageData['tracking_session_complete'] == true;
 
     if (sessionStart == null || sessionStart.isEmpty) {
-      return;
-    }
-
-    if (complete) {
       return;
     }
 
@@ -702,15 +782,23 @@ class AppState extends ChangeNotifier {
       return;
     }
 
-    final durationUntilExecution = sessionEnd.difference(DateTime.now());
-    if (durationUntilExecution.isNegative) {
-      return;
+    final now = DateTime.now();
+    final predictionAt = sessionEnd.subtract(const Duration(seconds: 1));
+    final durationUntilPrediction = predictionAt.difference(now);
+    if (!durationUntilPrediction.isNegative) {
+      _sessionPredictionTimer = Timer(durationUntilPrediction, () async {
+        await _runScheduledPredictionForSession(sessionStart);
+      });
     }
 
-    _sessionPredictionTimer = Timer(durationUntilExecution, () async {
-      await refreshUsage();
-      await _maybeAutoRunCompletedSessionPrediction();
-    });
+    final refreshAt = sessionEnd.add(const Duration(seconds: 1));
+    final durationUntilRefresh = refreshAt.difference(now);
+    if (!durationUntilRefresh.isNegative) {
+      _dailyPredictionTimer = Timer(durationUntilRefresh, () async {
+        UsageMonitorService.resetDailyFlags();
+        await refreshUsage();
+      });
+    }
   }
 
   Future<void> _maybeAutoRunCompletedSessionPrediction() async {
@@ -719,18 +807,58 @@ class AppState extends ChangeNotifier {
     }
 
     final snapshot = await AutoSensingService.forceRefresh();
-    final sessionStart = snapshot['tracking_session_start']?.toString();
-    final complete = snapshot['tracking_session_complete'] == true;
+    final currentSessionStart = snapshot['tracking_session_start']?.toString();
 
-    if (sessionStart == null || sessionStart.isEmpty || !complete) {
+    if (currentSessionStart == null || currentSessionStart.isEmpty) {
       return;
     }
 
-    if (_lastPredictedSessionStart == sessionStart) {
+    final currentBucketDate =
+        _trackingSessionLocalDateTime(currentSessionStart) ?? DateTime.now();
+    final previousDayKey =
+        _dateKeyFor(currentBucketDate.subtract(const Duration(days: 1)));
+
+    if (_dailyPredictions.containsKey(previousDayKey)) {
       return;
     }
 
-    await runDailyPrediction(rotateSessionAfterPrediction: true);
+    final previousUsage = _dailyUsageData[previousDayKey];
+    if (previousUsage == null || previousUsage.screenTime <= 0) {
+      return;
+    }
+
+    await runDailyPrediction(
+      rotateSessionAfterPrediction: false,
+      syncFromSensors: false,
+      recordKeyOverride: previousDayKey,
+      predictedSessionStart: previousDayKey,
+      usageOverride: previousUsage,
+    );
+  }
+
+  Future<void> _runScheduledPredictionForSession(String sessionStart) async {
+    if (_predictionStatus == PredictionStatus.loading) {
+      return;
+    }
+
+    final recordKey = _predictionDateKeyForSessionStart(sessionStart);
+    if (_dailyPredictions.containsKey(recordKey) ||
+        _lastPredictedSessionStart == sessionStart) {
+      return;
+    }
+
+    await runDailyPrediction(
+      rotateSessionAfterPrediction: false,
+      syncFromSensors: true,
+      recordKeyOverride: recordKey,
+      predictedSessionStart: sessionStart,
+    );
+  }
+
+  String _predictionDateKeyForSessionStart(String sessionStart) {
+    final start =
+        _trackingSessionLocalDateTime(sessionStart) ?? _todayUsage.date;
+    return _dateKeyFor(start);
   }
 
 // Trigger prediction from current usage data (for testing and immediate results)

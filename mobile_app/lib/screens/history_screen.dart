@@ -262,7 +262,7 @@ class HistoryScreen extends StatelessWidget {
                     Text(
                       predictionDays > 0
                           ? 'Daily automatic predictions across this week'
-                          : 'Usage history is available. Daily predictions will appear here after completed sessions.',
+                          : 'Usage history is available. Daily predictions will appear here after each calendar day ends.',
                       style: TextStyle(
                         fontSize: 14,
                         color: Colors.grey.shade600,
@@ -283,7 +283,7 @@ class HistoryScreen extends StatelessWidget {
             child: trendSpots.isEmpty
                 ? Center(
                     child: Text(
-                      'No completed daily predictions yet.\nKeep using SmartPulse and this chart will fill in automatically.',
+                      'No daily predictions yet.\nKeep using SmartPulse and this chart will fill in automatically after each day.',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 13,
